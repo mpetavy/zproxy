@@ -15,6 +15,7 @@ import (
 // https://en.wikipedia.org/wiki/SOCKS
 // Socks4: curl -v -x socks4://localhost:3128 http://www.google.de
 // Socks4a: curl -v -x socks4://localhost:3128 http://www.google.de
+// dig @localhost -p 1053 test.service
 
 const (
 	SOCKS4 = 4
@@ -306,7 +307,7 @@ func handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
 		parseDnsQuery(m)
 	}
 
-	w.WriteMsg(m)
+	common.Error(w.WriteMsg(m))
 }
 
 func createProxyServer() error {
@@ -323,8 +324,6 @@ func createProxyServer() error {
 	if common.Error(err) {
 		return err
 	}
-
-	fmt.Printf("Server listening: %s\n", *socksPort)
 
 	go func() {
 		defer common.UnregisterGoRoutine(common.RegisterGoRoutine())
@@ -379,6 +378,9 @@ func start() error {
 	if common.Error(errDns) {
 		return errDns
 	}
+
+	common.Info("Proxy server listening: %s\n", *socksPort)
+	common.Info("DNS server listening: %s\n", *dnsPort)
 
 	return nil
 }
