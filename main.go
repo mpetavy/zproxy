@@ -32,6 +32,7 @@ type SocksProxy struct {
 
 var (
 	address = flag.String("s", "", "Proxy address")
+	timeout = flag.Int("t", 3000, "read timeout")
 
 	server *common.NetworkServer
 )
@@ -135,7 +136,7 @@ func readTillNull(reader io.Reader) ([]byte, error) {
 }
 
 func handshake(conn net.Conn) (string, int, error) {
-	reader := common.NewTimeoutReader(conn, time.Second*5, true)
+	reader := common.NewTimeoutReader(conn, common.MillisecondToDuration(*timeout), true)
 
 	defer func() {
 		common.Error(conn.SetDeadline(time.Time{}))
