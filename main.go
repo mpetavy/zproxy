@@ -244,7 +244,7 @@ func handleClient(client *common.NetworkConnection) {
 		common.Error(remote.Close())
 	}()
 
-	common.DataTransfer("client", client, "remote", remote)
+	common.DataTransfer("proxyclient", client, "destination", remote)
 }
 
 func start() error {
