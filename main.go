@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"github.com/miekg/dns"
 	"github.com/mpetavy/common"
 	"io"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -31,24 +33,29 @@ type SocksProxy struct {
 }
 
 var (
-	address = flag.String("s", "", "Proxy address")
-	timeout = flag.Int("t", 3000, "read timeout")
+	socksPort = flag.String("s", ":1080", "Socks 'address:port' or only ':port'")
+	dnsPort   = flag.String("d", ":53", "DNS 'address:port' or only ':port'")
+	timeout   = flag.Int("t", 3000, "read timeout")
+	records   common.MultiValueFlag
 
-	server *common.NetworkServer
+	server    *common.NetworkServer
+	dnsServer *dns.Server
 )
 
 func init() {
 	common.Init(false, "1.0.0", "", "", "2018", "tcpproxy", "mpetavy", fmt.Sprintf("https://github.com/mpetavy/%s", common.Title()), common.APACHE, nil, start, stop, nil, 0)
+
+	flag.Var(&records, "r", "Static record lookups")
 }
 
 func NewSocksProxy(conn net.Conn) (*SocksProxy, error) {
 	common.DebugFunc()
 
-	hostname, port, err := handshake(conn)
+	hostname, port, err := proxyHandshake(conn)
 	if common.WarnError(err) {
 		common.Debug("socksproxy: reply rejected")
 
-		common.Error(reply(conn, REQUEST_REJECTED, 0, nil))
+		common.Error(proxyReply(conn, REQUEST_REJECTED, 0, nil))
 
 		return nil, err
 	}
@@ -57,7 +64,7 @@ func NewSocksProxy(conn net.Conn) (*SocksProxy, error) {
 	if common.WarnError(err) {
 		common.Debug("socksproxy: reply rejected")
 
-		common.Error(reply(conn, REQUEST_REJECTED, 0, nil))
+		common.Error(proxyReply(conn, REQUEST_REJECTED, 0, nil))
 
 		return nil, err
 	}
@@ -76,7 +83,7 @@ func NewSocksProxy(conn net.Conn) (*SocksProxy, error) {
 		if common.WarnError(err) {
 			common.Debug("socksproxy: reply rejected")
 
-			common.Error(reply(conn, REQUEST_REJECTED, 0, nil))
+			common.Error(proxyReply(conn, REQUEST_REJECTED, 0, nil))
 
 			return nil, err
 		}
@@ -84,7 +91,7 @@ func NewSocksProxy(conn net.Conn) (*SocksProxy, error) {
 
 	common.Debug("socksproxy: reply granted")
 
-	common.Error(reply(conn, REQUEST_GRANTED, port, ip))
+	common.Error(proxyReply(conn, REQUEST_GRANTED, port, ip))
 
 	sp := &SocksProxy{
 		Hostname: hostname,
@@ -96,7 +103,7 @@ func NewSocksProxy(conn net.Conn) (*SocksProxy, error) {
 	return sp, nil
 }
 
-func reply(conn net.Conn, code int, port int, ip []byte) error {
+func proxyReply(conn net.Conn, code int, port int, ip []byte) error {
 	buf := make([]byte, 8)
 
 	buf[1] = byte(code)
@@ -113,7 +120,7 @@ func reply(conn net.Conn, code int, port int, ip []byte) error {
 	return err
 }
 
-func readTillNull(reader io.Reader) ([]byte, error) {
+func readDnsName(reader io.Reader) ([]byte, error) {
 	var err error
 
 	buf := bytes.Buffer{}
@@ -135,7 +142,7 @@ func readTillNull(reader io.Reader) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func handshake(conn net.Conn) (string, int, error) {
+func proxyHandshake(conn net.Conn) (string, int, error) {
 	reader := common.NewTimeoutReader(conn, common.MillisecondToDuration(*timeout), true)
 
 	defer func() {
@@ -196,13 +203,13 @@ func handshake(conn net.Conn) (string, int, error) {
 		// socks4a
 
 		// user
-		buf, err = readTillNull(reader)
+		buf, err = readDnsName(reader)
 		if common.Error(err) {
 			return "", 0, err
 		}
 
 		// domain
-		buf, err = readTillNull(reader)
+		buf, err = readDnsName(reader)
 		if common.Error(err) {
 			return "", 0, err
 		}
@@ -215,7 +222,7 @@ func handshake(conn net.Conn) (string, int, error) {
 
 		hostname = fmt.Sprintf("%d.%d.%d.%d", buf[0], buf[1], buf[2], buf[3])
 
-		_, err = readTillNull(reader)
+		_, err = readDnsName(reader)
 		if common.Error(err) {
 			return "", 0, err
 		}
@@ -224,7 +231,7 @@ func handshake(conn net.Conn) (string, int, error) {
 	return hostname, port, nil
 }
 
-func handleClient(client *common.NetworkConnection) {
+func handleProxyClient(client *common.NetworkConnection) {
 	defer func() {
 		common.Debug("Client disconnected: %v\n", client.Socket)
 		common.Error(client.Close())
@@ -248,10 +255,66 @@ func handleClient(client *common.NetworkConnection) {
 	common.DataTransfer("proxyclient", client, "destination", remote)
 }
 
-func start() error {
+func staticRecords(name string) string {
+	for _, l := range records {
+		splits := strings.Split(l, ":")
+
+		for i := 0; i < len(splits); i++ {
+			if len(splits) == 2 {
+				host := strings.TrimSpace(splits[0])
+				ip := strings.TrimSpace(splits[1])
+
+				if host == name {
+					return ip
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+func parseDnsQuery(m *dns.Msg) {
+	for _, q := range m.Question {
+		switch q.Qtype {
+		case dns.TypeA:
+			common.Debug("Query for %s\n", q.Name)
+			ip := staticRecords(q.Name)
+			if ip == "" {
+				ips, err := net.LookupIP(q.Name)
+				if err == nil {
+					ip = ips[0].String()
+				}
+			}
+			if ip != "" {
+				rr, err := dns.NewRR(fmt.Sprintf("%s A %s", q.Name, ip))
+				if err == nil {
+					m.Answer = append(m.Answer, rr)
+				}
+			}
+		}
+	}
+}
+
+func handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
+	m := new(dns.Msg)
+	m.SetReply(r)
+	m.Compress = false
+
+	switch r.Opcode {
+	case dns.OpcodeQuery:
+		parseDnsQuery(m)
+	}
+
+	w.WriteMsg(m)
+}
+
+func createProxyServer() error {
+	common.DebugFunc()
+
 	var err error
 
-	server, err = common.NewNetworkServer(*address, nil)
+	server, err = common.NewNetworkServer(*socksPort, nil)
 	if common.Error(err) {
 		return err
 	}
@@ -261,7 +324,7 @@ func start() error {
 		return err
 	}
 
-	fmt.Printf("Server listening: %s\n", *address)
+	fmt.Printf("Server listening: %s\n", *socksPort)
 
 	go func() {
 		defer common.UnregisterGoRoutine(common.RegisterGoRoutine())
@@ -274,9 +337,48 @@ func start() error {
 				return
 			}
 
-			go handleClient(client)
+			go handleProxyClient(client)
 		}
 	}()
+
+	return nil
+}
+
+func createDnsServer() error {
+	common.DebugFunc()
+
+	dns.HandleFunc("service.", handleDnsRequest)
+
+	dnsServer = &dns.Server{Addr: fmt.Sprintf("%s", *dnsPort), Net: "udp"}
+	err := dnsServer.ListenAndServe()
+	if common.Error(err) {
+		return err
+	}
+
+	return nil
+}
+
+func start() error {
+	var errProxy error
+	var errDns error
+
+	go func() {
+		errProxy = createProxyServer()
+	}()
+
+	go func() {
+		errDns = createDnsServer()
+	}()
+
+	time.Sleep(common.MillisecondToDuration(*common.FlagServiceStartTimeout))
+
+	if common.Error(errProxy) {
+		return errProxy
+	}
+
+	if common.Error(errDns) {
+		return errDns
+	}
 
 	return nil
 }
