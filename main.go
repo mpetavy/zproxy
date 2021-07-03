@@ -52,47 +52,50 @@ func NewSocksProxy(conn net.Conn) (string, int, error) {
 
 	hostname, port, err := proxyHandshake(conn)
 	if common.Error(err) {
-		common.Debug("socksproxy: reply rejected")
-
-		common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_REJECTED, 0, nil))
-
 		return "", 0, err
 	}
-
-	addrs, err := net.LookupIP(hostname)
-	if common.Error(err) {
-		common.Debug("socksproxy: reply rejected")
-
-		common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_REJECTED, 0, nil))
-
-		return "", 0, err
-	}
-
-	var ip net.IP
-
-	for _, tempIp := range addrs {
-		if tempIp.To4() != nil {
-			ip = tempIp.To4()
-		}
-	}
-
-	if ip == nil {
-		err = fmt.Errorf("cannot find IP4 address")
-
-		if common.Error(err) {
-			common.Debug("socksproxy: reply rejected")
-
-			common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_REJECTED, 0, nil))
-
-			return "", 0, err
-		}
-	}
-
-	common.Debug("socksproxy: reply granted")
-
-	common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_GRANTED, port, ip))
-
-	common.Debug("socksproxy. hostname: %s port: %d", hostname, port)
+	//if common.Error(err) {
+	//	common.Debug("socksproxy: reply rejected")
+	//
+	//	common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_REJECTED, 0, nil))
+	//
+	//	return "", 0, err
+	//}
+	//
+	//addrs, err := net.LookupIP(hostname)
+	//if common.Error(err) {
+	//	common.Debug("socksproxy: reply rejected")
+	//
+	//	common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_REJECTED, 0, nil))
+	//
+	//	return "", 0, err
+	//}
+	//
+	//var ip net.IP
+	//
+	//for _, tempIp := range addrs {
+	//	if tempIp.To4() != nil {
+	//		ip = tempIp.To4()
+	//	}
+	//}
+	//
+	//if ip == nil {
+	//	err = fmt.Errorf("cannot find IP4 address")
+	//
+	//	if common.Error(err) {
+	//		common.Debug("socksproxy: reply rejected")
+	//
+	//		common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_REJECTED, 0, nil))
+	//
+	//		return "", 0, err
+	//	}
+	//}
+	//
+	//common.Debug("socksproxy: reply granted")
+	//
+	//common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_GRANTED, port, ip))
+	//
+	//common.Debug("socksproxy. hostname: %s port: %d", hostname, port)
 
 	return hostname, port, nil
 }
@@ -283,6 +286,21 @@ func proxyHandshake(conn net.Conn) (string, int, error) {
 		}
 
 		port = int(int(buf[0])*256) + int(buf[1])
+
+		var b bytes.Buffer
+
+		b.WriteByte(SOCKS5)
+		b.WriteByte(0)
+		b.WriteByte(0)
+		b.WriteByte(3)
+		b.WriteByte(byte(len(hostname)))
+		b.WriteString(hostname)
+		b.Write(buf)
+
+		err = writeBytes(conn, b.Bytes())
+		if common.Error(err) {
+			return "", 0, err
+		}
 	} else {
 		buf, err = readBytes(reader, 1)
 		if common.Error(err) {
