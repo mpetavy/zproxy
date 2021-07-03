@@ -161,10 +161,6 @@ func readTill0(reader io.Reader) ([]byte, error) {
 func proxyHandshake(conn net.Conn) (string, int, error) {
 	reader := common.NewTimeoutReader(conn, common.MillisecondToDuration(*timeout), true)
 
-	defer func() {
-		common.Error(conn.SetDeadline(time.Time{}))
-	}()
-
 	// read socks version
 
 	buf, err := readBytes(reader, 1)
@@ -188,10 +184,6 @@ func proxyHandshake(conn net.Conn) (string, int, error) {
 		if common.Error(err) {
 			return "", 0, err
 		}
-
-		//if buf[0] != SOCKS5 {
-		//	return "", 0, fmt.Errorf("Expected SOCKS 5 version failed: %d", buf[0])
-		//}
 
 		lenAuthMethods := buf[0]
 		buf, err = readBytes(reader, int(lenAuthMethods))
@@ -291,7 +283,6 @@ func proxyHandshake(conn net.Conn) (string, int, error) {
 		}
 
 		port = int(int(buf[0])*256) + int(buf[1])
-
 	} else {
 		buf, err = readBytes(reader, 1)
 		if common.Error(err) {
