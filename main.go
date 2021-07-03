@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"github.com/miekg/dns"
@@ -22,16 +23,13 @@ const (
 	SOCKS5 = 5
 
 	MODE_TCP_STREAM = 1
-	MODE_TCP_BIND   = 2
 
-	REQUEST_GRANTED  = 0x5A
-	REQUEST_REJECTED = 0x5B
+	SOCKS4_REQUEST_GRANTED  = 0x5A
+	SOCKS4_REQUEST_REJECTED = 0x5B
+
+	SOCKS5_REQUEST_GRANTED  = 0x0
+	SOCKS5_REQUEST_REJECTED = 0x5
 )
-
-type SocksProxy struct {
-	Hostname string
-	Port     int
-}
 
 var (
 	socksPort = flag.String("s", ":1080", "Socks 'address:port' or only ':port'")
@@ -49,25 +47,25 @@ func init() {
 	flag.Var(&records, "r", "Static record lookups")
 }
 
-func NewSocksProxy(conn net.Conn) (*SocksProxy, error) {
+func NewSocksProxy(conn net.Conn) (string, int, error) {
 	common.DebugFunc()
 
 	hostname, port, err := proxyHandshake(conn)
-	if common.WarnError(err) {
+	if common.Error(err) {
 		common.Debug("socksproxy: reply rejected")
 
-		common.Error(proxyReply(conn, REQUEST_REJECTED, 0, nil))
+		common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_REJECTED, 0, nil))
 
-		return nil, err
+		return "", 0, err
 	}
 
 	addrs, err := net.LookupIP(hostname)
-	if common.WarnError(err) {
+	if common.Error(err) {
 		common.Debug("socksproxy: reply rejected")
 
-		common.Error(proxyReply(conn, REQUEST_REJECTED, 0, nil))
+		common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_REJECTED, 0, nil))
 
-		return nil, err
+		return "", 0, err
 	}
 
 	var ip net.IP
@@ -81,30 +79,25 @@ func NewSocksProxy(conn net.Conn) (*SocksProxy, error) {
 	if ip == nil {
 		err = fmt.Errorf("cannot find IP4 address")
 
-		if common.WarnError(err) {
+		if common.Error(err) {
 			common.Debug("socksproxy: reply rejected")
 
-			common.Error(proxyReply(conn, REQUEST_REJECTED, 0, nil))
+			common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_REJECTED, 0, nil))
 
-			return nil, err
+			return "", 0, err
 		}
 	}
 
 	common.Debug("socksproxy: reply granted")
 
-	common.Error(proxyReply(conn, REQUEST_GRANTED, port, ip))
+	common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_GRANTED, port, ip))
 
-	sp := &SocksProxy{
-		Hostname: hostname,
-		Port:     port,
-	}
+	common.Debug("socksproxy. hostname: %s port: %d", hostname, port)
 
-	common.Debug("socksproxy: %+v", sp)
-
-	return sp, nil
+	return hostname, port, nil
 }
 
-func proxyReply(conn net.Conn, code int, port int, ip []byte) error {
+func socks4ProxyReply(conn net.Conn, code int, port int, ip []byte) error {
 	buf := make([]byte, 8)
 
 	buf[1] = byte(code)
@@ -116,19 +109,41 @@ func proxyReply(conn net.Conn, code int, port int, ip []byte) error {
 		}
 	}
 
-	_, err := conn.Write(buf)
-
-	return err
+	return writeBytes(conn, buf)
 }
 
-func readDnsName(reader io.Reader) ([]byte, error) {
-	var err error
+func writeBytes(writer io.Writer, buf []byte) error {
+	n, err := writer.Write(buf)
+	if common.Error(err) {
+		return err
+	}
+	if n != len(buf) {
+		return fmt.Errorf("not all bytes written. expected: %d actual: %d", len(buf), n)
+	}
 
+	return nil
+}
+
+func readBytes(reader io.Reader, length int) ([]byte, error) {
+	//buf, err := ioutil.ReadAll(io.LimitReader(reader, int64(len)))
+
+	buf := make([]byte, length)
+	n, err := io.ReadFull(reader, buf)
+	if common.Error(err) {
+		return nil, err
+	}
+	if n != len(buf) {
+		return nil, fmt.Errorf("not all bytes written. expected: %d actual: %d", len(buf), n)
+	}
+
+	return buf, nil
+}
+
+func readTill0(reader io.Reader) ([]byte, error) {
 	buf := bytes.Buffer{}
-	oneByte := make([]byte, 1)
 
 	for {
-		_, err = io.ReadFull(reader, oneByte)
+		oneByte, err := readBytes(reader, 1)
 		if common.Error(err) {
 			return nil, err
 		}
@@ -150,82 +165,189 @@ func proxyHandshake(conn net.Conn) (string, int, error) {
 		common.Error(conn.SetDeadline(time.Time{}))
 	}()
 
-	buf := make([]byte, 1)
+	// read socks version
 
-	_, err := reader.Read(buf)
+	buf, err := readBytes(reader, 1)
 	if common.Error(err) {
 		return "", 0, err
 	}
 
 	if buf[0] != SOCKS4 && buf[0] != SOCKS5 {
-		return "", 0, fmt.Errorf("unknown SOCKS connection: %d", buf[0])
+		return "", 0, fmt.Errorf("Unknown SOCKS version requested: %d", buf[0])
 	}
 
 	socksVersion := buf[0]
 
-	common.Debug("Request SOCKS connection: %d", socksVersion)
-
-	if socksVersion != SOCKS4 {
-		return "", 0, fmt.Errorf("unsupported SOCKS version: %d", socksVersion)
-	}
-
-	_, err = io.ReadFull(reader, buf)
-	if common.Error(err) {
-		return "", 0, err
-	}
-
-	mode := buf[0]
-	if mode != MODE_TCP_STREAM && mode != MODE_TCP_BIND {
-		return "", 0, fmt.Errorf("unknown SOCKS mode: %d", buf[0])
-	}
-
-	common.Debug("Request SOCKS mode : %d", mode)
-
-	buf = make([]byte, 2)
-	_, err = io.ReadFull(reader, buf)
-	if common.Error(err) {
-		return "", 0, err
-	}
-
-	port := int(int(buf[0])*256) + int(buf[1])
-
-	buf = make([]byte, 4)
-
-	_, err = io.ReadFull(reader, buf)
-	if common.Error(err) {
-		return "", 0, err
-	}
+	common.Debug("Requested SOCKS connection: %d", socksVersion)
 
 	var hostname string
+	var port int
 
-	if buf[0] == 0 && buf[1] == 0 && buf[2] == 0 && buf[3] != 0 {
-		common.Debug("Request SOCKS protocol: 4a")
-
-		// socks4a
-
-		// user
-		buf, err = readDnsName(reader)
+	if socksVersion == SOCKS5 {
+		buf, err = readBytes(reader, 1)
 		if common.Error(err) {
 			return "", 0, err
 		}
 
-		// domain
-		buf, err = readDnsName(reader)
+		//if buf[0] != SOCKS5 {
+		//	return "", 0, fmt.Errorf("Expected SOCKS 5 version failed: %d", buf[0])
+		//}
+
+		lenAuthMethods := buf[0]
+		buf, err = readBytes(reader, int(lenAuthMethods))
 		if common.Error(err) {
 			return "", 0, err
 		}
 
-		hostname = string(buf)
+		hasNoAuth := false
+		for _, auth := range buf {
+			hasNoAuth = auth == 0
+			if hasNoAuth {
+				break
+			}
+		}
+
+		answer := byte(0)
+		if !hasNoAuth {
+			answer = 255
+		}
+
+		buf = []byte{SOCKS5, answer}
+		err = writeBytes(conn, buf)
+		if common.Error(err) {
+			return "", 0, err
+		}
+
+		if !hasNoAuth {
+			return "", 0, fmt.Errorf("client does not support NoAuth")
+		}
+
+		buf, err = readBytes(reader, 2)
+		if common.Error(err) {
+			return "", 0, err
+		}
+
+		if buf[0] != SOCKS5 {
+			return "", 0, fmt.Errorf("Expected SOCKS 5 version failed: %d", buf[0])
+		}
+
+		mode := buf[1]
+		if mode != MODE_TCP_STREAM {
+			return "", 0, fmt.Errorf("Unknown SOCKS mode: %d", buf[0])
+		}
+
+		common.Debug("Requested SOCKS mode : %d", mode)
+
+		buf, err = readBytes(reader, 2)
+		if common.Error(err) {
+			return "", 0, err
+		}
+
+		if buf[0] != 0 {
+			return "", 0, fmt.Errorf("Expected 0 byte failed: %d", buf[0])
+		}
+
+		switch buf[1] {
+		case 1: // IPv4
+			buf, err = readBytes(reader, 4)
+			if common.Error(err) {
+				return "", 0, err
+			}
+
+			hostname = fmt.Sprintf("%d.%d.%d.%d", buf[0], buf[1], buf[2], buf[3])
+		case 3: // Domainname
+			buf, err = readBytes(reader, 1)
+			if common.Error(err) {
+				return "", 0, err
+			}
+
+			lenDomainName := buf[0]
+			buf, err = readBytes(reader, int(lenDomainName))
+			if common.Error(err) {
+				return "", 0, err
+			}
+
+			hostname = string(buf)
+		case 4: // IPv6
+			buf, err = readBytes(reader, 16)
+			if common.Error(err) {
+				return "", 0, err
+			}
+
+			hexValues := hex.EncodeToString(buf)
+
+			for i := 0; i < len(hexValues); i += 4 {
+				if i > 0 {
+					hostname = hostname + ":"
+				}
+
+				hostname = hostname + hexValues[i:i+4]
+			}
+		}
+
+		buf, err = readBytes(reader, 2)
+		if common.Error(err) {
+			return "", 0, err
+		}
+
+		port = int(int(buf[0])*256) + int(buf[1])
+
 	} else {
-		common.Debug("Request SOCKS protocol: 4")
-
-		// socks4
-
-		hostname = fmt.Sprintf("%d.%d.%d.%d", buf[0], buf[1], buf[2], buf[3])
-
-		_, err = readDnsName(reader)
+		buf, err = readBytes(reader, 1)
 		if common.Error(err) {
 			return "", 0, err
+		}
+
+		mode := buf[0]
+		if mode != MODE_TCP_STREAM {
+			return "", 0, fmt.Errorf("unknown SOCKS mode: %d", buf[0])
+		}
+
+		common.Debug("Request SOCKS mode : %d", mode)
+
+		// read port
+
+		buf, err = readBytes(reader, 2)
+		if common.Error(err) {
+			return "", 0, err
+		}
+
+		port = int(int(buf[0])*256) + int(buf[1])
+
+		buf, err = readBytes(reader, 4)
+		if common.Error(err) {
+			return "", 0, err
+		}
+
+		if buf[0] == 0 && buf[1] == 0 && buf[2] == 0 && buf[3] != 0 {
+			common.Debug("Request SOCKS protocol: 4a")
+
+			// socks4a
+
+			// user
+			buf, err = readTill0(reader)
+			if common.Error(err) {
+				return "", 0, err
+			}
+
+			// domain
+			buf, err = readTill0(reader)
+			if common.Error(err) {
+				return "", 0, err
+			}
+
+			hostname = string(buf)
+		} else {
+			common.Debug("Request SOCKS protocol: 4")
+
+			// socks4
+
+			hostname = fmt.Sprintf("%d.%d.%d.%d", buf[0], buf[1], buf[2], buf[3])
+
+			_, err = readTill0(reader)
+			if common.Error(err) {
+				return "", 0, err
+			}
 		}
 	}
 
@@ -240,12 +362,12 @@ func handleProxyClient(client *common.NetworkConnection) {
 
 	common.Debug("Client connected: %v\n", client.Socket)
 
-	proxy, err := NewSocksProxy(client.Socket)
+	hostname, port, err := NewSocksProxy(client.Socket)
 	if common.Error(err) {
 		return
 	}
 
-	remote, err := net.Dial("tcp", fmt.Sprintf("%s:%d", proxy.Hostname, proxy.Port))
+	remote, err := net.Dial("tcp", fmt.Sprintf("%s:%d", hostname, port))
 	if err != nil {
 		return
 	}
