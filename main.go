@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -39,6 +40,7 @@ var (
 
 	server    *common.NetworkServer
 	dnsServer *dns.Server
+	tlsConfig *tls.Config
 )
 
 func init() {
@@ -278,6 +280,8 @@ func proxyHandshake(conn net.Conn) (string, int, error) {
 
 				hostname = hostname + hexValues[i:i+4]
 			}
+
+			hostname = "[" + hostname + "]"
 		}
 
 		buf, err = readBytes(reader, 2)
@@ -376,15 +380,28 @@ func handleProxyClient(client *common.NetworkConnection) {
 		return
 	}
 
-	remote, err := net.Dial("tcp", fmt.Sprintf("%s:%d", hostname, port))
-	if err != nil {
+	common.Debug("Connect to: %s:%d", hostname, port)
+
+	//config := tlsConfig
+	//if port != 443 {
+	//	config = nil
+	//}
+
+	remote, err := common.NewNetworkClient(fmt.Sprintf("%s:%d", hostname, port), nil)
+	if common.Error(err) {
 		return
 	}
+
+	conn, err := remote.Connect()
+	if common.Error(err) {
+		return
+	}
+
 	defer func() {
-		common.Error(remote.Close())
+		common.Error(conn.Close())
 	}()
 
-	common.DataTransfer("proxyclient", client, "destination", remote)
+	common.DataTransfer("proxyclient", client, "destination", conn)
 }
 
 func staticRecords(name string) string {
@@ -491,6 +508,13 @@ func createDnsServer() error {
 func start() error {
 	var errProxy error
 	var errDns error
+
+	var err error
+
+	tlsConfig, err = common.NewTlsConfigFromFlags()
+	if common.Error(err) {
+		return err
+	}
 
 	go func() {
 		errProxy = createProxyServer()
