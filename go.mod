@@ -3,8 +3,8 @@ module zproxy
 go 1.16
 
 require (
-	github.com/miekg/dns v1.1.43 // indirect
-	github.com/mpetavy/common v1.2.44
+	github.com/miekg/dns v1.1.43
+	github.com/mpetavy/common v1.2.45
 )
 
 //replace github.com/mpetavy/common => ../common
