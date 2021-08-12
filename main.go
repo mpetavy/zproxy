@@ -474,7 +474,7 @@ func createProxyServer() error {
 	}
 
 	go func() {
-		defer common.UnregisterGoRoutine(common.RegisterGoRoutine())
+		defer common.UnregisterGoRoutine(common.RegisterGoRoutine(1))
 
 		for common.AppLifecycle().IsSet() {
 			common.Debug("Wait on client connection...")
