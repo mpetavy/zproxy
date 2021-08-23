@@ -4,7 +4,7 @@ go 1.16
 
 require (
 	github.com/miekg/dns v1.1.43
-	github.com/mpetavy/common v1.3.7
+	github.com/mpetavy/common v1.3.8
 )
 
 //replace github.com/mpetavy/common => ../common
