@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/hex"
 	"flag"
@@ -401,7 +402,9 @@ func handleProxyClient(client *common.NetworkConnection) {
 		common.Error(conn.Close())
 	}()
 
-	common.DataTransfer("proxyclient", client, "destination", conn)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	common.DataTransfer(ctx, cancel, "proxyclient", client, "destination", conn)
 }
 
 func staticRecords(name string) string {
