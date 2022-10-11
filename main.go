@@ -7,22 +7,21 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
-	"github.com/miekg/dns"
 	"github.com/mpetavy/common"
 	"io"
 	"net"
-	"strings"
 	"time"
 )
 
 // https://en.wikipedia.org/wiki/SOCKS
 // Socks4: curl -v -x socks4://localhost:3128 http://www.google.de
-// Socks4a: curl -v -x socks4://localhost:3128 http://www.google.de
+// Socks4a: curl -v -x socks4a://localhost:3128 http://www.google.de
 // dig @localhost -p 1053 test.service
 
 const (
-	SOCKS4 = 4
-	SOCKS5 = 5
+	DNS_QUERY = 1
+	SOCKS4    = 4
+	SOCKS5    = 5
 
 	MODE_TCP_STREAM = 1
 
@@ -34,20 +33,17 @@ const (
 )
 
 var (
-	socksPort = flag.String("s", ":1080", "Socks 'address:port' or only ':port'")
-	dnsPort   = flag.String("d", ":53", "DNS 'address:port' or only ':port'")
-	timeout   = flag.Int("t", 3000, "read timeout")
-	records   common.MultiValueFlag
+	serverAddress = flag.String("s", ":1080", "is server (standalone,proxy bridge)")
+	clientAddress = flag.String("c", "", "is client (proxy bridge)")
+	timeout       = flag.Int("t", 3000, "read timeout")
+	useTls        = flag.Bool("tls", true, "use TLS encryption")
 
 	server    *common.NetworkServer
-	dnsServer *dns.Server
 	tlsConfig *tls.Config
 )
 
 func init() {
 	common.Init(false, "1.0.0", "", "", "2018", "tcpproxy", "mpetavy", fmt.Sprintf("https://github.com/mpetavy/%s", common.Title()), common.APACHE, nil, start, stop, nil, 0)
-
-	flag.Var(&records, "r", "Static record lookups")
 }
 
 func NewSocksProxy(conn net.Conn) (string, int, error) {
@@ -57,48 +53,6 @@ func NewSocksProxy(conn net.Conn) (string, int, error) {
 	if common.Error(err) {
 		return "", 0, err
 	}
-	//if common.Error(err) {
-	//	common.Debug("socksproxy: reply rejected")
-	//
-	//	common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_REJECTED, 0, nil))
-	//
-	//	return "", 0, err
-	//}
-	//
-	//addrs, err := net.LookupIP(hostname)
-	//if common.Error(err) {
-	//	common.Debug("socksproxy: reply rejected")
-	//
-	//	common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_REJECTED, 0, nil))
-	//
-	//	return "", 0, err
-	//}
-	//
-	//var ip net.IP
-	//
-	//for _, tempIp := range addrs {
-	//	if tempIp.To4() != nil {
-	//		ip = tempIp.To4()
-	//	}
-	//}
-	//
-	//if ip == nil {
-	//	err = fmt.Errorf("cannot find IP4 address")
-	//
-	//	if common.Error(err) {
-	//		common.Debug("socksproxy: reply rejected")
-	//
-	//		common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_REJECTED, 0, nil))
-	//
-	//		return "", 0, err
-	//	}
-	//}
-	//
-	//common.Debug("socksproxy: reply granted")
-	//
-	//common.Error(socks4ProxyReply(conn, SOCKS4_REQUEST_GRANTED, port, ip))
-	//
-	//common.Debug("socksproxy. hostname: %s port: %d", hostname, port)
 
 	return hostname, port, nil
 }
@@ -131,8 +85,6 @@ func writeBytes(writer io.Writer, buf []byte) error {
 }
 
 func readBytes(reader io.Reader, length int) ([]byte, error) {
-	//buf, err := ioutil.ReadAll(io.LimitReader(reader, int64(len)))
-
 	buf := make([]byte, length)
 	n, err := io.ReadFull(reader, buf)
 	if common.Error(err) {
@@ -174,7 +126,7 @@ func proxyHandshake(conn net.Conn) (string, int, error) {
 		return "", 0, err
 	}
 
-	if buf[0] != SOCKS4 && buf[0] != SOCKS5 {
+	if buf[0] != DNS_QUERY && buf[0] != SOCKS4 && buf[0] != SOCKS5 {
 		return "", 0, fmt.Errorf("Unknown SOCKS version requested: %d", buf[0])
 	}
 
@@ -368,7 +320,7 @@ func proxyHandshake(conn net.Conn) (string, int, error) {
 	return hostname, port, nil
 }
 
-func handleProxyClient(client *common.NetworkConnection) {
+func createProxyClient(client *common.NetworkConnection) {
 	defer func() {
 		common.Debug("Client disconnected: %v\n", client.Socket)
 		common.Error(client.Close())
@@ -383,20 +335,23 @@ func handleProxyClient(client *common.NetworkConnection) {
 
 	common.Debug("Connect to: %s:%d", hostname, port)
 
-	//config := tlsConfig
-	//if port != 443 {
-	//	config = nil
-	//}
+	ipbytes := make([]byte, 4)
 
 	remote, err := common.NewNetworkClient(fmt.Sprintf("%s:%d", hostname, port), nil)
 	if common.Error(err) {
+		socks4ProxyReply(client.Socket, SOCKS4_REQUEST_REJECTED, 0, ipbytes)
+
 		return
 	}
 
 	conn, err := remote.Connect()
 	if common.Error(err) {
+		socks4ProxyReply(client.Socket, SOCKS4_REQUEST_REJECTED, 0, ipbytes)
+
 		return
 	}
+
+	socks4ProxyReply(client.Socket, SOCKS4_REQUEST_GRANTED, 0, ipbytes)
 
 	defer func() {
 		common.Error(conn.Close())
@@ -404,61 +359,7 @@ func handleProxyClient(client *common.NetworkConnection) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	common.DataTransfer(ctx, cancel, "proxyclient", client, "destination", conn)
-}
-
-func staticRecords(name string) string {
-	for _, l := range records {
-		splits := strings.Split(l, ":")
-
-		for i := 0; i < len(splits); i++ {
-			if len(splits) == 2 {
-				host := strings.TrimSpace(splits[0])
-				ip := strings.TrimSpace(splits[1])
-
-				if host == name {
-					return ip
-				}
-			}
-		}
-	}
-
-	return ""
-}
-
-func parseDnsQuery(m *dns.Msg) {
-	for _, q := range m.Question {
-		switch q.Qtype {
-		case dns.TypeA:
-			common.Debug("Query for %s\n", q.Name)
-			ip := staticRecords(q.Name)
-			if ip == "" {
-				ips, err := net.LookupIP(q.Name)
-				if err == nil {
-					ip = ips[0].String()
-				}
-			}
-			if ip != "" {
-				rr, err := dns.NewRR(fmt.Sprintf("%s A %s", q.Name, ip))
-				if err == nil {
-					m.Answer = append(m.Answer, rr)
-				}
-			}
-		}
-	}
-}
-
-func handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
-	m := new(dns.Msg)
-	m.SetReply(r)
-	m.Compress = false
-
-	switch r.Opcode {
-	case dns.OpcodeQuery:
-		parseDnsQuery(m)
-	}
-
-	common.Error(w.WriteMsg(m))
+	common.DataTransfer(ctx, cancel, "proxyclient", client, fmt.Sprintf("%s:%d", hostname, port), conn)
 }
 
 func createProxyServer() error {
@@ -466,7 +367,7 @@ func createProxyServer() error {
 
 	var err error
 
-	server, err = common.NewNetworkServer(*socksPort, nil)
+	server, err = common.NewNetworkServer(*serverAddress, nil)
 	if common.Error(err) {
 		return err
 	}
@@ -484,33 +385,18 @@ func createProxyServer() error {
 
 			client, err := server.Connect()
 			if common.Error(err) {
-				return
+				continue
 			}
 
-			go handleProxyClient(client)
+			go createProxyClient(client)
 		}
 	}()
 
 	return nil
 }
 
-func createDnsServer() error {
-	common.DebugFunc()
-
-	dns.HandleFunc("service.", handleDnsRequest)
-
-	dnsServer = &dns.Server{Addr: fmt.Sprintf("%s", *dnsPort), Net: "udp"}
-	err := dnsServer.ListenAndServe()
-	if common.Error(err) {
-		return err
-	}
-
-	return nil
-}
-
 func start() error {
 	var errProxy error
-	var errDns error
 
 	var err error
 
@@ -523,22 +409,13 @@ func start() error {
 		errProxy = createProxyServer()
 	}()
 
-	go func() {
-		errDns = createDnsServer()
-	}()
-
 	time.Sleep(common.MillisecondToDuration(*common.FlagServiceStartTimeout))
 
 	if common.Error(errProxy) {
 		return errProxy
 	}
 
-	if common.Error(errDns) {
-		return errDns
-	}
-
-	common.Info("Proxy server listening: %s\n", *socksPort)
-	common.Info("DNS server listening: %s\n", *dnsPort)
+	common.Info("Proxy server listening: %s\n", *serverAddress)
 
 	return nil
 }
@@ -555,5 +432,5 @@ func stop() error {
 func main() {
 	defer common.Done()
 
-	common.Run([]string{"s"})
+	common.Run([]string{"c|s"})
 }
