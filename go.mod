@@ -4,7 +4,7 @@ go 1.19
 
 require (
 	github.com/miekg/dns v1.1.43
-	github.com/mpetavy/common v1.4.47
+	github.com/mpetavy/common v1.4.48
 )
 
 require (
