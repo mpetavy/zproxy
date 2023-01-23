@@ -446,7 +446,11 @@ func createProxyServer() error {
 				continue
 			}
 
-			go createProxyClient(client)
+			go func() {
+				defer common.UnregisterGoRoutine(common.RegisterGoRoutine(1))
+
+				createProxyClient(client)
+			}()
 		}
 	}()
 
@@ -472,10 +476,14 @@ func start() error {
 	var errDns error
 
 	go func() {
+		defer common.UnregisterGoRoutine(common.RegisterGoRoutine(1))
+
 		errProxy = createProxyServer()
 	}()
 
 	go func() {
+		defer common.UnregisterGoRoutine(common.RegisterGoRoutine(1))
+
 		errDns = createDnsServer()
 	}()
 
