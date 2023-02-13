@@ -43,7 +43,7 @@ var (
 )
 
 func init() {
-	common.Init("1.0.0", "", "", "2018", "tcpproxy", "mpetavy", fmt.Sprintf("https://github.com/mpetavy/%s", common.Title()), common.APACHE, nil, start, stop, nil, 0)
+	common.Init("zproxy", "1.0.0", "", "", "2018", "tcpproxy", "mpetavy", fmt.Sprintf("https://github.com/mpetavy/%s", common.Title()), common.APACHE, nil, start, stop, nil, 0)
 
 	flag.Var(&records, "r", "Static record lookups")
 }
