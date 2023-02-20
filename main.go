@@ -11,7 +11,6 @@ import (
 	"io"
 	"net"
 	"strings"
-	"time"
 )
 
 // https://en.wikipedia.org/wiki/SOCKS
@@ -487,7 +486,7 @@ func start() error {
 		errDns = createDnsServer()
 	}()
 
-	time.Sleep(common.MillisecondToDuration(*common.FlagServiceStartTimeout))
+	common.Sleep(common.MillisecondToDuration(*common.FlagServiceStartTimeout))
 
 	if common.Error(errProxy) {
 		return errProxy
