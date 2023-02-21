@@ -118,9 +118,7 @@ func readTill0(reader io.Reader) ([]byte, error) {
 }
 
 func handshake(conn net.Conn) (string, int, error) {
-	reader := common.NewTimeoutReader(conn, true, func() (context.Context, context.CancelFunc) {
-		return context.WithTimeout(context.Background(), common.MillisecondToDuration(*timeout))
-	})
+	reader := common.NewTimeoutReader(conn, true, common.MillisecondToDuration(*timeout))
 
 	// read socks version
 
