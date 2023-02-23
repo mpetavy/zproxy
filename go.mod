@@ -1,10 +1,10 @@
 module zproxy
 
-go 1.20
+go 1.19
 
 require (
 	github.com/miekg/dns v1.1.43
-	github.com/mpetavy/common v1.5.51
+	github.com/mpetavy/common v1.5.52
 )
 
 require (
