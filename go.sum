@@ -143,8 +143,8 @@ github.com/mattn/go-isatty v0.0.18/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D
 github.com/mattn/go-sqlite3 v1.14.16 h1:yOQRA0RpS5PFz/oikGwBEqvAWhWg5ufRz4ETLjwpU1Y=
 github.com/miekg/dns v1.1.54 h1:5jon9mWcb0sFJGpnI99tOMhCPyJ+RPVz5b63MQG0VWI=
 github.com/miekg/dns v1.1.54/go.mod h1:uInx36IzPl7FYnDcMeVWxj9byh7DutNykX4G9Sj60FY=
-github.com/mpetavy/common v1.6.0 h1:i3IRdZF3d9nNCymgjThEzIVgs3U/gZwUkIGxynvCilc=
-github.com/mpetavy/common v1.6.0/go.mod h1:9nha5SChzVqcBHv3TR1kFAscSHigBJKDTH9hu08S3iU=
+github.com/mpetavy/common v1.6.1 h1:6JJxoBabCjvqu4eE99CHeHKXnxX2dC75dmerMgkIz8M=
+github.com/mpetavy/common v1.6.1/go.mod h1:GEqfYDbezF2Npovw3CO742VaCLDzp6EE2j12vxhU4yw=
 github.com/ompluscator/dynamic-struct v1.4.0 h1:I/Si9LZtItSwiTMe7vosEuIu2TKdOvWbE3R/lokpN4Q=
 github.com/ompluscator/dynamic-struct v1.4.0/go.mod h1:ADQ1+6Ox1D+ntuNwTHyl1NvpAqY2lBXPSPbcO4CJdeA=
 github.com/paulrosania/go-charset v0.0.0-20190326053356-55c9d7a5834c h1:P6XGcuPTigoHf4TSu+3D/7QOQ1MbL6alNwrGhcW7sKw=
