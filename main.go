@@ -6,17 +6,37 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
-	"github.com/miekg/dns"
 	"github.com/mpetavy/common"
 	"io"
 	"net"
-	"strings"
 )
 
 // https://en.wikipedia.org/wiki/SOCKS
-// Socks4: curl -v -x socks4://localhost:3128 http://www.google.de
-// Socks4a: curl -v -x socks4a://localhost:3128 http://www.google.de
-// dig @localhost -p 1053 test.service
+//
+// Socks4: curl -v -x socks4://localhost:1080 http://www.google.de
+// Socks4a: curl -v -x socks4a://localhost:1080 http://www.google.de
+// Socks5: curl -v -x socks5://localhost:1080 http://www.google.de
+// Socks5h: curl -v -x socks5h://localhost:1080 http://www.google.de
+//
+// Socks4: local DNS resolution
+// Socks5: local DNS resolution
+//
+// Socks4a: remote DNS resolution
+// Socks5h: remote DNS resolution
+//
+// https://technik-blog.eu/2023/04/socks5-proxy-server-mit-curl-nutzen/
+// https://blog.emacsos.com/use-socks5-proxy-in-curl.html
+// https://datatracker.ietf.org/doc/html/rfc1929
+//
+// Linux
+//
+// export http_proxy=socks5h://172.23.192.1:1080
+// export https_proxy=socks5h://172.23.192.1:1080
+// export all_proxy=socks5h://172.23.192.1:1080
+//
+// export HTTP_PROXY=socks5h://172.23.192.1:1080
+// export HTTPS_PROXY=socks5h://172.23.192.1:1080
+// export ALL_PROXY=socks5h://172.23.192.1:1080
 
 const (
 	SOCKS4 = 4
@@ -29,52 +49,30 @@ const (
 
 	SOCKS5_REQUEST_GRANTED  = 0x0
 	SOCKS5_REQUEST_REJECTED = 0x5
+
+	AUTH_NONE              = 0
+	AUTH_GSSAPI            = 1
+	AUTH_USERNAME_PASSWORD = 2
 )
 
 var (
 	serverAddress = flag.String("s", ":1080", "is server (standalone,proxy bridge)")
-	dnsPort       = flag.String("d", ":1053", "DNS 'address:port' or only ':port'")
 	timeout       = flag.Int("t", 3000, "read timeout")
-	records       common.MultiValueFlag
-
-	server    *common.NetworkServer
-	dnsServer *dns.Server
+	username      = flag.String("u", "", "username")
+	password      = flag.String("p", "", "password")
+	server        *common.NetworkServer
 )
 
 func init() {
 	common.Init("zproxy", "", "", "", "2018", "tcpproxy", "mpetavy", fmt.Sprintf("https://github.com/mpetavy/%s", common.Title()), common.APACHE, nil, start, stop, nil, 0)
-
-	flag.Var(&records, "r", "Static record lookups")
-}
-
-func NewSocksProxy(conn net.Conn) (string, int, error) {
-	common.DebugFunc()
-
-	hostname, port, err := handshake(conn)
-	if common.Error(err) {
-		return "", 0, err
-	}
-
-	return hostname, port, nil
-}
-
-func socks4ProxyReply(conn net.Conn, code int, port int, ip []byte) error {
-	buf := make([]byte, 8)
-
-	buf[1] = byte(code)
-	buf[2] = byte(port & 0xff00)
-	buf[3] = byte(port & 0x00ff)
-	if ip != nil {
-		for i := 0; i < 4; i++ {
-			buf[4+i] = ip[i]
-		}
-	}
-
-	return writeBytes(conn, buf)
 }
 
 func writeBytes(writer io.Writer, buf []byte) error {
-	n, err := writer.Write(buf)
+	common.DebugFunc()
+
+	timeoutWriter := common.NewTimeoutWriter(writer, true, common.MillisecondToDuration(*timeout))
+
+	n, err := timeoutWriter.Write(buf)
 	if common.Error(err) {
 		return err
 	}
@@ -86,8 +84,12 @@ func writeBytes(writer io.Writer, buf []byte) error {
 }
 
 func readBytes(reader io.Reader, length int) ([]byte, error) {
+	common.DebugFunc()
+
+	timeoutReader := common.NewTimeoutReader(reader, true, common.MillisecondToDuration(*timeout))
+
 	buf := make([]byte, length)
-	n, err := io.ReadFull(reader, buf)
+	n, err := io.ReadFull(timeoutReader, buf)
 	if common.Error(err) {
 		return nil, err
 	}
@@ -99,6 +101,8 @@ func readBytes(reader io.Reader, length int) ([]byte, error) {
 }
 
 func readTill0(reader io.Reader) ([]byte, error) {
+	common.DebugFunc()
+
 	buf := bytes.Buffer{}
 
 	for {
@@ -117,21 +121,21 @@ func readTill0(reader io.Reader) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func handshake(conn net.Conn) (string, int, error) {
-	reader := common.NewTimeoutReader(conn, true, common.MillisecondToDuration(*timeout))
+func handshake(conn net.Conn) (int, string, int, error) {
+	common.DebugFunc()
 
 	// read socks version
 
-	buf, err := readBytes(reader, 1)
+	buf, err := readBytes(conn, 1)
 	if common.Error(err) {
-		return "", 0, err
+		return 0, "", 0, err
 	}
 
 	if buf[0] != SOCKS4 && buf[0] != SOCKS5 {
-		return "", 0, fmt.Errorf("Unknown SOCKS version requested: %d", buf[0])
+		return 0, "", 0, fmt.Errorf("Unknown SOCKS version requested: %d", buf[0])
 	}
 
-	socksVersion := buf[0]
+	socksVersion := int(buf[0])
 
 	common.Debug("Requested SOCKS connection: %d", socksVersion)
 
@@ -139,90 +143,164 @@ func handshake(conn net.Conn) (string, int, error) {
 	var port int
 
 	if socksVersion == SOCKS5 {
-		buf, err = readBytes(reader, 1)
+		// read client supported auth methods
+
+		buf, err = readBytes(conn, 1)
 		if common.Error(err) {
-			return "", 0, err
+			return socksVersion, "", 0, err
 		}
 
 		lenAuthMethods := buf[0]
-		buf, err = readBytes(reader, int(lenAuthMethods))
+		buf, err = readBytes(conn, int(lenAuthMethods))
 		if common.Error(err) {
-			return "", 0, err
+			return socksVersion, "", 0, err
 		}
 
+		hasUsernamePassword := false
 		hasNoAuth := false
+
 		for _, auth := range buf {
-			hasNoAuth = auth == 0
-			if hasNoAuth {
-				break
+			switch auth {
+			case AUTH_NONE:
+				hasNoAuth = true
+			case AUTH_USERNAME_PASSWORD:
+				hasUsernamePassword = true
 			}
 		}
 
-		answer := byte(0)
-		if !hasNoAuth {
-			answer = 255
+		if !hasNoAuth && !hasUsernamePassword {
+			// send "unsupported auth methods"
+
+			err = writeBytes(conn, []byte{SOCKS5, 255})
+			if common.Error(err) {
+				return socksVersion, "", 0, err
+			}
+
+			return socksVersion, "", 0, fmt.Errorf("client auths not supported: %v", buf)
 		}
 
-		buf = []byte{SOCKS5, answer}
-		err = writeBytes(conn, buf)
+		// send server choosen auth method
+
+		if hasNoAuth {
+			// send "no authentication required" method
+
+			err = writeBytes(conn, []byte{SOCKS5, AUTH_NONE})
+			if common.Error(err) {
+				return socksVersion, "", 0, err
+			}
+		}
+
+		if hasUsernamePassword {
+			// send "username/password" method
+
+			err = writeBytes(conn, []byte{SOCKS5, AUTH_USERNAME_PASSWORD})
+			if common.Error(err) {
+				return socksVersion, "", 0, err
+			}
+
+			// reads client authentication
+
+			_, err = readBytes(conn, 1)
+			if common.Error(err) {
+				return socksVersion, "", 0, err
+			}
+
+			// read username
+
+			buf, err = readBytes(conn, 1)
+			if common.Error(err) {
+				return socksVersion, "", 0, err
+			}
+
+			len := buf[0]
+
+			buf, err = readBytes(conn, int(len))
+			if common.Error(err) {
+				return socksVersion, "", 0, err
+			}
+
+			clientUsername := string(buf)
+
+			// read password
+
+			len = buf[0]
+
+			buf, err = readBytes(conn, int(len))
+			if common.Error(err) {
+				return socksVersion, "", 0, err
+			}
+
+			clientPassword := string(buf)
+
+			if (*username != "" && *username != clientUsername) || (*password != "" && *password != clientPassword) {
+				// access denied
+
+				err = writeBytes(conn, []byte{SOCKS5, 255})
+				if common.Error(err) {
+					return socksVersion, "", 0, err
+				}
+
+				return socksVersion, "", 0, fmt.Errorf("invalid credentials", buf)
+			}
+
+			// access granted
+
+			err = writeBytes(conn, []byte{SOCKS5, 0})
+			if common.Error(err) {
+				return socksVersion, "", 0, err
+			}
+		}
+
+		buf, err = readBytes(conn, 2)
 		if common.Error(err) {
-			return "", 0, err
-		}
-
-		if !hasNoAuth {
-			return "", 0, fmt.Errorf("client does not support NoAuth")
-		}
-
-		buf, err = readBytes(reader, 2)
-		if common.Error(err) {
-			return "", 0, err
+			return socksVersion, "", 0, err
 		}
 
 		if buf[0] != SOCKS5 {
-			return "", 0, fmt.Errorf("Expected SOCKS 5 version failed: %d", buf[0])
+			return socksVersion, "", 0, fmt.Errorf("Expected SOCKS 5 version failed: %d", buf[0])
 		}
 
 		mode := buf[1]
 		if mode != MODE_TCP_STREAM {
-			return "", 0, fmt.Errorf("Unknown SOCKS mode: %d", buf[0])
+			return socksVersion, "", 0, fmt.Errorf("Unknown SOCKS mode: %d", buf[0])
 		}
 
 		common.Debug("Requested SOCKS mode : %d", mode)
 
-		buf, err = readBytes(reader, 2)
+		buf, err = readBytes(conn, 2)
 		if common.Error(err) {
-			return "", 0, err
+			return socksVersion, "", 0, err
 		}
 
 		if buf[0] != 0 {
-			return "", 0, fmt.Errorf("Expected 0 byte failed: %d", buf[0])
+			return socksVersion, "", 0, fmt.Errorf("Expected 0 byte failed: %d", buf[0])
 		}
 
 		switch buf[1] {
 		case 1: // IPv4
-			buf, err = readBytes(reader, 4)
+			buf, err = readBytes(conn, 4)
 			if common.Error(err) {
-				return "", 0, err
+				return socksVersion, "", 0, err
 			}
 
 			hostname = fmt.Sprintf("%d.%d.%d.%d", buf[0], buf[1], buf[2], buf[3])
 		case 3: // Domainname
-			buf, err = readBytes(reader, 1)
+			buf, err = readBytes(conn, 1)
 			if common.Error(err) {
-				return "", 0, err
+				return socksVersion, "", 0, err
 			}
 
 			lenDomainName := buf[0]
-			buf, err = readBytes(reader, int(lenDomainName))
+			buf, err = readBytes(conn, int(lenDomainName))
 			if common.Error(err) {
-				return "", 0, err
+				return socksVersion, "", 0, err
 			}
 
 			hostname = string(buf)
 		case 4: // IPv6
-			buf, err = readBytes(reader, 16)
+			buf, err = readBytes(conn, 16)
 			if common.Error(err) {
-				return "", 0, err
+				return socksVersion, "", 0, err
 			}
 
 			hexValues := hex.EncodeToString(buf)
@@ -238,53 +316,44 @@ func handshake(conn net.Conn) (string, int, error) {
 			hostname = "[" + hostname + "]"
 		}
 
-		buf, err = readBytes(reader, 2)
+		buf, err = readBytes(conn, 2)
 		if common.Error(err) {
-			return "", 0, err
+			return socksVersion, "", 0, err
 		}
 
 		port = int(int(buf[0])*256) + int(buf[1])
-
-		var b bytes.Buffer
-
-		b.WriteByte(SOCKS5)
-		b.WriteByte(0)
-		b.WriteByte(0)
-		b.WriteByte(3)
-		b.WriteByte(byte(len(hostname)))
-		b.WriteString(hostname)
-		b.Write(buf)
-
-		err = writeBytes(conn, b.Bytes())
-		if common.Error(err) {
-			return "", 0, err
-		}
 	} else {
-		buf, err = readBytes(reader, 1)
+		buf, err = readBytes(conn, 1)
 		if common.Error(err) {
-			return "", 0, err
+			return socksVersion, "", 0, err
 		}
+
+		// read mode
 
 		mode := buf[0]
 		if mode != MODE_TCP_STREAM {
-			return "", 0, fmt.Errorf("unknown SOCKS mode: %d", buf[0])
+			return socksVersion, "", 0, fmt.Errorf("unknown SOCKS mode: %d", buf[0])
 		}
 
 		common.Debug("Request SOCKS mode : %d", mode)
 
 		// read port
 
-		buf, err = readBytes(reader, 2)
+		buf, err = readBytes(conn, 2)
 		if common.Error(err) {
-			return "", 0, err
+			return socksVersion, "", 0, err
 		}
 
 		port = int(int(buf[0])*256) + int(buf[1])
 
-		buf, err = readBytes(reader, 4)
+		// read IP address
+
+		buf, err = readBytes(conn, 4)
 		if common.Error(err) {
-			return "", 0, err
+			return socksVersion, "", 0, err
 		}
+
+		// socks4 or socks4a ?
 
 		if buf[0] == 0 && buf[1] == 0 && buf[2] == 0 && buf[3] != 0 {
 			common.Debug("Request SOCKS protocol: 4a")
@@ -292,15 +361,15 @@ func handshake(conn net.Conn) (string, int, error) {
 			// socks4a
 
 			// user
-			buf, err = readTill0(reader)
+			buf, err = readTill0(conn)
 			if common.Error(err) {
-				return "", 0, err
+				return socksVersion, "", 0, err
 			}
 
 			// domain
-			buf, err = readTill0(reader)
+			buf, err = readTill0(conn)
 			if common.Error(err) {
-				return "", 0, err
+				return socksVersion, "", 0, err
 			}
 
 			hostname = string(buf)
@@ -311,113 +380,95 @@ func handshake(conn net.Conn) (string, int, error) {
 
 			hostname = fmt.Sprintf("%d.%d.%d.%d", buf[0], buf[1], buf[2], buf[3])
 
-			_, err = readTill0(reader)
+			_, err = readTill0(conn)
 			if common.Error(err) {
-				return "", 0, err
+				return socksVersion, "", 0, err
 			}
 		}
 	}
 
-	return hostname, port, nil
+	return socksVersion, hostname, port, nil
 }
 
-func createProxyClient(client *common.NetworkConnection) {
+func runProxyClient(client *common.NetworkConnection) {
 	defer func() {
 		common.Debug("Client disconnected: %v\n", client.Socket)
+
 		common.Error(client.Close())
 	}()
 
-	common.Debug("Client connected: %v\n", client.Socket)
+	common.DebugFunc("Local: %v Remote %v", client.Socket.LocalAddr(), client.Socket.RemoteAddr())
 
-	hostname, port, err := NewSocksProxy(client.Socket)
+	socksVersion, hostname, port, err := handshake(client.Socket)
 	if common.Error(err) {
 		return
 	}
 
-	common.Debug("Connect to: %s:%d", hostname, port)
+	common.Debug("Remote connection to: %s:%d", hostname, port)
 
-	ipbytes := make([]byte, 4)
+	remoteClient, _ := common.NewNetworkClient(fmt.Sprintf("%s:%d", hostname, port), nil)
 
-	remote, err := common.NewNetworkClient(fmt.Sprintf("%s:%d", hostname, port), nil)
+	remoteConn, err := remoteClient.Connect()
 	if common.Error(err) {
-		common.Error(socks4ProxyReply(client.Socket, SOCKS4_REQUEST_REJECTED, 0, ipbytes))
+		if socksVersion == 4 {
+			err := writeBytes(client.Socket, []byte{0, byte(SOCKS4_REQUEST_REJECTED), 0, 0, 0, 0, 0, 0})
+			if common.Error(err) {
+				return
+			}
+		} else {
+			var b bytes.Buffer
+
+			b.WriteByte(SOCKS5)
+			b.WriteByte(SOCKS5_REQUEST_REJECTED)
+			b.WriteByte(0)
+			b.WriteByte(3)
+			b.WriteByte(byte(len(hostname)))
+			b.Write([]byte(hostname))
+			b.WriteByte(0)
+			b.WriteByte(0)
+
+			err = writeBytes(client.Socket, b.Bytes())
+			if common.Error(err) {
+				return
+			}
+		}
 
 		return
 	}
 
-	conn, err := remote.Connect()
-	if common.Error(err) {
-		common.Error(socks4ProxyReply(client.Socket, SOCKS4_REQUEST_REJECTED, 0, ipbytes))
+	if socksVersion == SOCKS4 {
+		err := writeBytes(client.Socket, []byte{0, byte(SOCKS4_REQUEST_GRANTED), 0, 0, 0, 0, 0, 0})
+		if common.Error(err) {
+			return
+		}
+	} else {
+		var b bytes.Buffer
 
-		return
+		b.WriteByte(SOCKS5)
+		b.WriteByte(SOCKS5_REQUEST_GRANTED)
+		b.WriteByte(0)
+		b.WriteByte(3)
+		b.WriteByte(byte(len(hostname)))
+		b.Write([]byte(hostname))
+		b.WriteByte(byte(port / 256))
+		b.WriteByte(byte(port % 256))
+
+		err = writeBytes(client.Socket, b.Bytes())
+		if common.Error(err) {
+			return
+		}
 	}
-
-	common.Error(socks4ProxyReply(client.Socket, SOCKS4_REQUEST_GRANTED, 0, ipbytes))
 
 	defer func() {
-		common.Error(conn.Close())
+		common.Error(remoteConn.Close())
 	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	common.DataTransfer(ctx, cancel, "proxyclient", client, fmt.Sprintf("%s:%d", hostname, port), conn)
+	common.DataTransfer(ctx, cancel, "proxyclient", client, fmt.Sprintf("%s:%d", hostname, port), remoteConn)
 }
 
-func staticRecords(name string) string {
-	for _, l := range records {
-		splits := strings.Split(l, ":")
-
-		for i := 0; i < len(splits); i++ {
-			if len(splits) == 2 {
-				host := strings.TrimSpace(splits[0])
-				ip := strings.TrimSpace(splits[1])
-
-				if host == name {
-					return ip
-				}
-			}
-		}
-	}
-
-	return ""
-}
-
-func parseDnsQuery(m *dns.Msg) {
-	for _, q := range m.Question {
-		switch q.Qtype {
-		case dns.TypeA:
-			common.Debug("Query for %s\n", q.Name)
-			ip := staticRecords(q.Name)
-			if ip == "" {
-				ips, err := net.LookupIP(q.Name)
-				if err == nil {
-					ip = ips[0].String()
-				}
-			}
-			if ip != "" {
-				rr, err := dns.NewRR(fmt.Sprintf("%s A %s", q.Name, ip))
-				if err == nil {
-					m.Answer = append(m.Answer, rr)
-				}
-			}
-		}
-	}
-}
-
-func handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
-	m := new(dns.Msg)
-	m.SetReply(r)
-	m.Compress = false
-
-	switch r.Opcode {
-	case dns.OpcodeQuery:
-		parseDnsQuery(m)
-	}
-
-	common.Error(w.WriteMsg(m))
-}
-
-func createProxyServer() error {
+func runProxyServer() error {
 	common.DebugFunc()
 
 	var err error
@@ -446,24 +497,10 @@ func createProxyServer() error {
 			go func() {
 				defer common.UnregisterGoRoutine(common.RegisterGoRoutine(1))
 
-				createProxyClient(client)
+				runProxyClient(client)
 			}()
 		}
 	}()
-
-	return nil
-}
-
-func createDnsServer() error {
-	common.DebugFunc()
-
-	dns.HandleFunc("service.", handleDnsRequest)
-
-	dnsServer = &dns.Server{Addr: fmt.Sprintf("%s", *dnsPort), Net: "udp"}
-	err := dnsServer.ListenAndServe()
-	if common.Error(err) {
-		return err
-	}
 
 	return nil
 }
@@ -475,13 +512,7 @@ func start() error {
 	go func() {
 		defer common.UnregisterGoRoutine(common.RegisterGoRoutine(1))
 
-		errProxy = createProxyServer()
-	}()
-
-	go func() {
-		defer common.UnregisterGoRoutine(common.RegisterGoRoutine(1))
-
-		errDns = createDnsServer()
+		errProxy = runProxyServer()
 	}()
 
 	common.Sleep(common.MillisecondToDuration(*common.FlagServiceStartTimeout))
@@ -495,7 +526,6 @@ func start() error {
 	}
 
 	common.Info("Proxy server listening: %s\n", *serverAddress)
-	common.Info("DNS server listening: %s\n", *dnsPort)
 
 	return nil
 }
