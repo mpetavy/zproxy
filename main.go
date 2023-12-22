@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"embed"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -63,8 +64,11 @@ var (
 	server        *common.NetworkServer
 )
 
+//go:embed go.mod
+var resources embed.FS
+
 func init() {
-	common.Init("zproxy", "", "", "", "2018", "tcpproxy", "mpetavy", fmt.Sprintf("https://github.com/mpetavy/%s", common.Title()), common.APACHE, nil, start, stop, nil, 0)
+	common.Init("", "", "", "", "tcpproxy", "", "", "", &resources, start, stop, nil, 0)
 }
 
 func writeBytes(writer io.Writer, buf []byte) error {
@@ -515,7 +519,7 @@ func start() error {
 		errProxy = runProxyServer()
 	}()
 
-	common.Sleep(common.MillisecondToDuration(*common.FlagServiceStartTimeout))
+	common.Sleep(common.MillisecondToDuration(*common.FlagServiceTimeout))
 
 	if common.Error(errProxy) {
 		return errProxy
