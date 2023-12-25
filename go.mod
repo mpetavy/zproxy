@@ -1,10 +1,10 @@
-module zproxy
+module github.com/mpetavy/zproxy
 
 go 1.21
 
 toolchain go1.21.1
 
-require github.com/mpetavy/common v1.6.38
+require github.com/mpetavy/common v1.6.41
 
 require (
 	cloud.google.com/go v0.110.2 // indirect
