@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"embed"
 	"encoding/hex"
 	"flag"
@@ -10,6 +11,7 @@ import (
 	"github.com/mpetavy/common"
 	"io"
 	"net"
+	"os"
 )
 
 // https://en.wikipedia.org/wiki/SOCKS
@@ -61,7 +63,9 @@ var (
 	timeout       = flag.Int("t", 3000, "read timeout")
 	username      = flag.String("u", "", "username")
 	password      = flag.String("p", "", "password")
-	server        *common.NetworkServer
+	useTls        = flag.Bool("tls", false, "use TLS")
+
+	server *common.NetworkServer
 )
 
 //go:embed go.mod
@@ -472,12 +476,42 @@ func runProxyClient(client *common.NetworkConnection) {
 	common.DataTransfer(ctx, cancel, "proxyclient", client, fmt.Sprintf("%s:%d", hostname, port), remoteConn)
 }
 
+func setupTLS() (*tls.Config, error) {
+	common.DebugFunc()
+
+	if !*useTls {
+		return nil, nil
+	}
+
+	tlsConfig, err := common.NewTlsConfigFromFlags()
+	if common.Error(err) {
+		return nil, err
+	}
+
+	if !common.FileExists(*common.FlagTlsCertificate) {
+		ba, err := common.TlsConfigToP12(tlsConfig, *common.FlagTlsPassword)
+		if common.Error(err) {
+			return nil, err
+		}
+
+		err = os.WriteFile(common.AppFilename(".p12"), ba, os.ModePerm)
+		if common.Error(err) {
+			return nil, err
+		}
+	}
+
+	return tlsConfig, nil
+}
+
 func runProxyServer() error {
 	common.DebugFunc()
 
-	var err error
+	tlsConfig, err := setupTLS()
+	if common.Error(err) {
+		return err
+	}
 
-	server, err = common.NewNetworkServer(*serverAddress, nil)
+	server, err = common.NewNetworkServer(*serverAddress, tlsConfig)
 	if common.Error(err) {
 		return err
 	}
@@ -544,5 +578,5 @@ func stop() error {
 }
 
 func main() {
-	common.Run([]string{"s"})
+	common.Run(nil)
 }
