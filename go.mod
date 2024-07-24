@@ -4,11 +4,12 @@ go 1.21
 
 toolchain go1.21.1
 
-require github.com/mpetavy/common v1.8.45
+require github.com/mpetavy/common v1.8.46
 
 require (
 	github.com/beevik/etree v1.1.4 // indirect
 	github.com/creack/goselect v0.1.2 // indirect
+	github.com/dlclark/regexp2 v1.11.2 // indirect
 	github.com/fatih/structtag v1.2.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.2 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
