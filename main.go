@@ -494,7 +494,7 @@ func setupTLS() (*tls.Config, error) {
 			return nil, err
 		}
 
-		err = os.WriteFile(common.AppFilename(".p12"), ba, os.ModePerm)
+		err = os.WriteFile(common.AppFilename(".p12"), ba, common.DefaultFileMode)
 		if common.Error(err) {
 			return nil, err
 		}
