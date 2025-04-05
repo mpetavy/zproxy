@@ -33,13 +33,9 @@ import (
 //
 // Linux
 //
-// export http_proxy=socks5h://172.23.192.1:1080
-// export https_proxy=socks5h://172.23.192.1:1080
-// export all_proxy=socks5h://172.23.192.1:1080
-//
-// export HTTP_PROXY=socks5h://172.23.192.1:1080
-// export HTTPS_PROXY=socks5h://172.23.192.1:1080
-// export ALL_PROXY=socks5h://172.23.192.1:1080
+// export http_proxy=socks5h://localhost:1080
+// export https_proxy=socks5h://localhost:1080
+// export all_proxy=socks5h://localhost:1080
 
 const (
 	SOCKS4 = 4
@@ -483,21 +479,45 @@ func setupTLS() (*tls.Config, error) {
 		return nil, nil
 	}
 
-	tlsConfig, err := common.NewTlsConfigFromFlags()
+	filenameP12 := common.AppFilename(".p12")
+	filenameCRT := common.AppFilename(".crt")
+
+	var tlsConfig *tls.Config
+
+	if !common.FileExists(filenameP12) {
+		var err error
+
+		tlsConfig, err = common.NewTlsConfigFromFlags()
+		if common.Error(err) {
+			return nil, err
+		}
+
+		ba := common.CertificateAsPEM(&tlsConfig.Certificates[0])
+
+		err = os.WriteFile(filenameCRT, ba, common.DefaultFileMode)
+		if common.Error(err) {
+			return nil, err
+		}
+
+		ba, err = common.TlsConfigToP12(tlsConfig, *common.FlagTlsPassword)
+		if common.Error(err) {
+			return nil, err
+		}
+
+		err = os.WriteFile(filenameP12, ba, common.DefaultFileMode)
+		if common.Error(err) {
+			return nil, err
+		}
+	}
+
+	ba, err := os.ReadFile(filenameP12)
 	if common.Error(err) {
 		return nil, err
 	}
 
-	if !common.FileExists(*common.FlagTlsCertificate) {
-		ba, err := common.TlsConfigToP12(tlsConfig, *common.FlagTlsPassword)
-		if common.Error(err) {
-			return nil, err
-		}
-
-		err = os.WriteFile(common.AppFilename(".p12"), ba, common.DefaultFileMode)
-		if common.Error(err) {
-			return nil, err
-		}
+	tlsConfig, err = common.TlsConfigFromP12(ba, *common.FlagTlsPassword)
+	if common.Error(err) {
+		return nil, err
 	}
 
 	return tlsConfig, nil
